@@ -1,0 +1,17 @@
+[package]
+name = "disk-collector"
+version = "0.1.0"
+edition = "2021"
+description = "Windows disk space collector with Python bindings"
+
+[lib]
+name = "disk_collector"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+walkdir = "2"
+windows = { version = "0.58", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+] }

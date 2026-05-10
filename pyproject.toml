@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.5", "setuptools>=68"]
+build-backend = "maturin"
+
+[project]
+name = "storage-monitor"
+version = "0.1.0"
+description = "Windows 11 Storage Monitoring System"
+authors = [{ name = "Storage Monitor Team" }]
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+]
+
+[tool.maturin]
+module-name = "disk_collector"
+bindings = "pyo3"
+manifest-path = "rust-collector/Cargo.toml"
+
+[project.scripts]
+storage-monitor = "gui.dashboard:main"
