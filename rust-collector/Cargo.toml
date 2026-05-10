@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread", "fs"] }
 walkdir = "2"
 windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",

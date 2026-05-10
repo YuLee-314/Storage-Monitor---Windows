@@ -67,14 +67,15 @@ class TreeSizeFiller:
         try:
             from disk_collector import get_dir_tree_sizes
 
-            def progress(msg: str):
-                self._queue.put(("__progress__", msg, 0))
+            def on_stream(name: str, size_bytes: int):
+                """Called from Rust as each subdirectory completes."""
+                if name == "__done__":
+                    return  # final signal, ignore
+                if size_bytes > 0:
+                    pct = (size_bytes / self._total * 100) if self._total else 0
+                    self._queue.put((name, format_bytes(size_bytes), pct))
 
-            self.entries = get_dir_tree_sizes(self._path, progress)
-            for e in self.entries:
-                if e.size_bytes > 0:
-                    pct = (e.size_bytes / self._total * 100) if self._total else 0
-                    self._queue.put((e.name, format_bytes(e.size_bytes), pct))
+            self.entries = get_dir_tree_sizes(self._path, on_stream)
         except Exception:
             pass
         finally:

@@ -27,6 +27,7 @@ class DirCache:
         children = {}
         for e in entries:
             children[e.name] = {
+                "name": e.name,
                 "size": e.size_bytes,
                 "is_dir": e.is_dir,
                 "path": e.path,

@@ -444,11 +444,12 @@ fn get_dir_contents_sized(
     Ok(dirs)
 }
 
-// ── Single-pass tree size ──────────────────────────────────────────
+// ── Streaming async tree size ─────────────────────────────────────
 
-/// Walk `path` once, accumulating directory sizes bottom-up (like dust/rdirstat).
-/// Returns sizes for immediate children only.  Much faster than calling
-/// `get_dir_contents_sized` because the tree is traversed only once.
+/// Spawn a tokio blocking task for each top-level subdirectory.
+/// As each task completes, calls `progress(name, size_bytes)` so the
+/// Python UI can update incrementally (streaming).  Returns the merged
+/// results as well (for cache storage).
 #[pyfunction]
 #[pyo3(signature = (path, progress=None))]
 fn get_dir_tree_sizes(
@@ -464,42 +465,92 @@ fn get_dir_tree_sizes(
     }
     let root_str = root.to_string_lossy().to_string();
 
-    let root_clone = root_str.clone();
-    let (dir_sizes, _file_count) = py.allow_threads(move || -> (HashMap<String, u64>, u64) {
-        let mut dir_sizes: HashMap<String, u64> = HashMap::new();
-        let mut file_count: u64 = 0;
+    let subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_type().map(|ft| ft.is_dir()).unwrap_or(false)
+                && !is_protected_dir(&e.file_name().to_string_lossy())
+        })
+        .map(|e| e.path())
+        .collect();
 
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() { continue; }
-            let epath = entry.path();
-            if is_protected_path(epath) { continue; }
+    let total_subdirs = subdirs.len();
 
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if size == 0 { continue; }
+    // Clone callback refs for cross-thread use (one per subdir)
+    let cb_refs: Vec<Option<PyObject>> = subdirs.iter().map(|_| {
+        progress.as_ref().map(|_| {
+            Python::with_gil(|py| progress.as_ref().unwrap().clone_ref(py))
+        })
+    }).collect();
 
-            let mut parent = epath.parent();
-            while let Some(p) = parent {
-                let pstr = p.to_string_lossy().to_string();
-                if pstr.len() < root_clone.len() { break; }
-                if is_protected_path(p) { break; }
-                *dir_sizes.entry(pstr.clone()).or_insert(0) += size;
-                parent = p.parent();
+    let root_str2 = root_str.clone();
+    let merged: HashMap<String, u64> = py.allow_threads(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut handles = Vec::with_capacity(subdirs.len());
+
+            for (subdir, cb) in subdirs.into_iter().zip(cb_refs.into_iter()) {
+                let root_clone = root_str2.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    let mut local: HashMap<String, u64> = HashMap::new();
+                    for entry in walkdir::WalkDir::new(&subdir)
+                        .follow_links(false)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                    {
+                        if !entry.file_type().is_file() { continue; }
+                        let epath = entry.path();
+                        if is_protected_path(epath) { continue; }
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        if size == 0 { continue; }
+
+                        let mut parent = epath.parent();
+                        while let Some(p) = parent {
+                            let pstr = p.to_string_lossy().to_string();
+                            if pstr.len() < root_clone.len() { break; }
+                            if is_protected_path(p) { break; }
+                            *local.entry(pstr.clone()).or_insert(0) += size;
+                            parent = p.parent();
+                        }
+                    }
+
+                    // Stream: emit immediate-child sizes via callback
+                    if let Some(ref cb) = cb {
+                        Python::with_gil(|py| {
+                            for (dir_path, size) in &local {
+                                let rel = if let Some(s) = dir_path.strip_prefix(&root_clone) {
+                                    s.trim_start_matches(&['\\', '/'][..]).to_string()
+                                } else { continue; };
+                                if rel.is_empty() || rel.contains('\\') || rel.contains('/') {
+                                    continue;
+                                }
+                                let _ = cb.call1(py, (rel, *size));
+                            }
+                        });
+                    }
+
+                    local
+                }));
             }
-            file_count += 1;
-        }
-        (dir_sizes, file_count)
+
+            // Merge results as tasks complete
+            let mut merged: HashMap<String, u64> = HashMap::new();
+            for handle in handles {
+                if let Ok(local) = handle.await {
+                    for (k, v) in local {
+                        *merged.entry(k).or_insert(0) += v;
+                    }
+                }
+            }
+            merged
+        })
     });
 
-    if let Some(ref cb) = progress {
-        let _ = cb.call1(py, (format!("{} files scanned", _file_count),));
-    }
-
+    // Build sorted result
     let mut result: Vec<FileEntry> = Vec::new();
-    for (dir_path, size) in &dir_sizes {
+    for (dir_path, size) in &merged {
         let rel = if let Some(stripped) = dir_path.strip_prefix(&root_str) {
             stripped.trim_start_matches(&['\\', '/'][..]).to_string()
         } else { continue; };
@@ -512,6 +563,14 @@ fn get_dir_tree_sizes(
         });
     }
     result.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+
+    // Final progress message
+    if let Some(ref p) = progress {
+        let _ = Python::with_gil(|py| {
+            p.call1(py, ("__done__", total_subdirs as u64))
+        });
+    }
+
     Ok(result)
 }
 
